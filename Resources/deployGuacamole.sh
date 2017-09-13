@@ -64,6 +64,7 @@ sudo cat <<EOF2 > /etc/guacamole/user-mapping.xml
 EOF2
 # Create a new user
 sudo useradd -d /etc/guacamole -p "$(openssl passwd -1 %PASSWORD%)" %USERNAME%
+echo "guac ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/guac
 
 # Enable SSH passwords
 sudo sed -i -e 's/PasswordAuthentication no/PasswordAuthentication yes/g' /etc/ssh/sshd_config
