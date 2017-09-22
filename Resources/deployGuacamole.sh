@@ -16,70 +16,107 @@ guac_version="0.9.13-incubating"
 # Tomcat version
 tcat_version=7
 
-sudo apt-get update
+apt-get update
+
 # Install Packages
-sudo apt-get install -y -q make libcairo2-dev libpango-1.0-0 libpango1.0-dev libssh2-1-dev libpng12-dev freerdp-x11 \
-                                libssh2-1 libvncserver-dev libfreerdp-dev libvorbis-dev libssl1.0.0 gcc libssh-dev \
-                                libpulse-dev libtelnet-dev libossp-uuid-dev
+debconf-set-selections <<< "mysql-server mysql-server/root_password password %PASSWORD%"
+debconf-set-selections <<< "mysql-server mysql-server/root_password_again password %PASSWORD%"
+
+apt-get -y install build-essential libcairo2-dev libjpeg-turbo8-dev libpng12-dev libossp-uuid-dev libavcodec-dev libavutil-dev \
+  libswscale-dev libfreerdp-dev libpango1.0-dev libssh2-1-dev libtelnet-dev libvncserver-dev libpulse-dev libssl-dev \
+  libvorbis-dev libwebp-dev mysql-server mysql-client mysql-common mysql-utilities freerdp ghostscript jq wget curl
+
 # Download Guacamole Client
-sudo wget http://sourceforge.net/projects/guacamole/files/current/binary/guacamole-${guac_version}.war
+wget http://sourceforge.net/projects/guacamole/files/current/binary/guacamole-${guac_version}.war
+
 # Download Guacamole Server
-sudo wget http://sourceforge.net/projects/guacamole/files/current/source/guacamole-server-${guac_version}.tar.gz
+wget http://sourceforge.net/projects/guacamole/files/current/source/guacamole-server-${guac_version}.tar.gz
+
+# Download Guacamole MySQL
+wget https://downloads.sourceforge.net/project/guacamole/current/extensions/guacamole-auth-jdbc-${guac_version}.tar.gz
+
 # Untar the guacamole server source files
-sudo tar -xzf guacamole-server-${guac_version}.tar.gz
+tar -xzf guacamole-server-${guac_version}.tar.gz
+
+# Configure MySQL
+mkdir /etc/guacamole
+mkdir /etc/guacamole/extensions
+mkdir /etc/guacamole/lib
+tar -xzf guacamole-auth-jdbc-${guac_version}.tar.gz
+wget https://dev.mysql.com/get/Downloads/Connector-J/mysql-connector-java-5.1.41.tar.gz
+tar -xzf mysql-connector-java-5.1.41.tar.gz
+cp mysql-connector-java-5.1.41/mysql-connector-java-5.1.41-bin.jar /etc/guacamole/lib/
+cp guacamole-auth-jdbc-${guac_version}/mysql/guacamole-auth-jdbc-mysql-${guac_version}.jar /etc/guacamole/extensions/
+
 # Change directory to the source files
-cd guacamole-server-${guac_version}/
-sudo ./configure --with-init-dir=/etc/init.d
-sudo make
-sudo make install
-sudo update-rc.d guacd defaults
-sudo ldconfig
+pushd guacamole-server-${guac_version}/
+./configure --with-init-dir=/etc/init.d
+make
+make install
+update-rc.d guacd defaults
+ldconfig
+popd
+
 # Create guacamole configuration directory
-sudo mkdir /etc/guacamole
-# Create guacamole.properties configuration file
-sudo cat <<EOF1 > /etc/guacamole/guacamole.properties
-basic-user-mapping: /etc/guacamole/user-mapping.xml
-EOF1
-# Create user-mapping.xml configuration file
-sudo cat <<EOF2 > /etc/guacamole/user-mapping.xml
-<user-mapping>
-    <authorize username="%USERNAME%" password="$(echo -n %PASSWORD% | md5sum | awk '{print $1}')" encoding="md5">
-        <connection name="localhost-ssh">
-            <protocol>ssh</protocol>
-            <param name="hostname">127.0.0.1</param>
-            <param name="port">22</param>
-        </connection>
-        <connection name="otherhost-vnc">
-            <protocol>vnc</protocol>
-            <param name="hostname">otherhost</param>
-            <param name="port">5901</param>
-        </connection>
-        <connection name="otherhost-rdp">
-            <protocol>rdp</protocol>
-            <param name="hostname">otherhost</param>
-            <param name="port">3389</param>
-        </connection>
-    </authorize>
-</user-mapping>
-EOF2
+echo "mysql-hostname: localhost" >> /etc/guacamole/guacamole.properties
+echo "mysql-port: 3306" >> /etc/guacamole/guacamole.properties
+echo "mysql-database: guacamole_db" >> /etc/guacamole/guacamole.properties
+echo "mysql-username: guacamole_user" >> /etc/guacamole/guacamole.properties
+echo "mysql-password: %PASSWORD%" >> /etc/guacamole/guacamole.properties
+
 # Create a new user
-sudo useradd -d /etc/guacamole -p "$(openssl passwd -1 %PASSWORD%)" %USERNAME%
-echo "guac ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/guac
+useradd -d /etc/guacamole -p "$(openssl passwd -1 %PASSWORD%)" %USERNAME%
+echo "guac ALL=(ALL) NOPASSWD:ALL" | tee /etc/sudoers.d/guac
 
 # Enable SSH passwords
-sudo sed -i -e 's/PasswordAuthentication no/PasswordAuthentication yes/g' /etc/ssh/sshd_config
-sudo service sshd restart
+sed -i -e 's/PasswordAuthentication no/PasswordAuthentication yes/g' /etc/ssh/sshd_config
+service sshd restart
+
+# Create guacamole_db and grant guacamole_user permissions to it
+
+MYCNF="[client]
+user=root
+host=localhost
+password='%PASSWORD%'
+socket=/var/run/mysqld/mysqld.sock
+"
+
+echo "$MYCNF" | tee /root/.my.cnf
+
+# SQL Code
+SQLCODE="
+create database guacamole_db;
+create user 'guacamole_user'@'localhost' identified by '%PASSWORD%';
+GRANT SELECT,INSERT,UPDATE,DELETE ON guacamole_db.* TO 'guacamole_user'@'localhost';
+flush privileges;"
+
+# Execute SQL Code
+echo "$SQLCODE" | mysql --defaults-extra-file=/root/.my.cnf
+
+# Add Guacamole Schema to newly created database
+cat guacamole-auth-jdbc-${guac_version}/mysql/schema/*.sql | mysql --defaults-extra-file=/root/.my.cnf guacamole_db
+
+SQLCODE="
+use guacamole_db;
+SET @salt = UNHEX(SHA2(UUID(), 256));
+update guacamole_user set username = '%USERNAME%', password_hash = UNHEX(SHA2(CONCAT('%PASSWORD%', HEX(@salt)), 256)), password_salt = @salt where user_id = 1;"
+echo "$SQLCODE" | mysql --defaults-extra-file=/root/.my.cnf
 
 # Make guacamole configuration directory readable and writable by the group and others
-sudo chmod -R go+rw /etc/guacamole
-sudo mkdir /usr/share/tomcat${tcat_version}/.guacamole
+chmod -R go+rw /etc/guacamole
+mkdir /usr/share/tomcat${tcat_version}/.guacamole
+
 # Create a symbolic link of the properties file for Tomcat
-sudo ln -s /etc/guacamole/guacamole.properties /usr/share/tomcat${tcat_version}/.guacamole
-# Move up a directory to copy the guacamole.war file
-cd ..
+ln -s /etc/guacamole/guacamole.properties /usr/share/tomcat${tcat_version}/.guacamole
+
 # Copy the guacamole war file to the Tomcat webapps directory
-sudo cp guacamole-${guac_version}.war /var/lib/tomcat${tcat_version}/webapps/guacamole.war
+cp guacamole-${guac_version}.war /var/lib/tomcat${tcat_version}/webapps/guacamole.war
+
 # Start the Guacamole (guacd) service
-sudo service guacd start
+service guacd start
+
+# Set environment variable for tomcat
+echo "GUACAMOLE_HOME=/etc/guacamole" >> /etc/default/tomcat${tcat_version}
+
 # Restart Tomcat
-sudo service tomcat${tcat_version} restart
+service tomcat${tcat_version} restart
